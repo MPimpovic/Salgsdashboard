@@ -1,0 +1,764 @@
+/**
+ * onOpen() – Tilføjer en brugerdefineret menu til regnearket.
+ * Menuen har tre muligheder:
+ *   • "Scan nye mails" – Scanner kun mails med de aktive labels.
+ *   • "Refresh alle mails (inkluder arkiverede)" – Scanner også mails med label "Arkiveret - Script".
+ *   • "Scan hele indbakken" – Scanner alle mails i indbakken (læs og ulæs).
+ */
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu("Opdatering")
+    .addItem("Scan nye mails", "scanAllMails")
+    .addItem("Refresh alle mails (inkluder arkiverede)", "refreshAllMails")
+    .addItem("Scan hele indbakken", "scanEntireInbox")
+    .addToUi();
+}
+
+/**
+ * scanAllMails() – Scanner kun mails med de aktive labels.
+ */
+function scanAllMails() {
+  Logger.log("Starter scanning af nye mails…");
+  
+  checkVintedMails(false);
+  checkDbaMails(false);
+  checkTraderaMails(false);
+  
+  SpreadsheetApp.flush();
+  setupConditionalFormatting();
+  updateDashboard();
+  applyStrikethroughToCancelled();
+  formatArk1();
+  formatDashboard();
+  
+  Logger.log("Færdig med scanning af nye mails.");
+}
+
+/**
+ * refreshAllMails() – Scanner alle mails (inkluderer dem med label "Arkiveret - Script").
+ */
+function refreshAllMails() {
+  Logger.log("Starter refresh – scanner alle mails (inkluderede arkiverede) …");
+  
+  checkVintedMails(true);
+  checkDbaMails(true);
+  checkTraderaMails(true);
+  
+  SpreadsheetApp.flush();
+  setupConditionalFormatting();
+  updateDashboard();
+  applyStrikethroughToCancelled();
+  formatArk1();
+  formatDashboard();
+  
+  Logger.log("Refresh færdig – alle mails er scannet.");
+}
+
+/**
+ * scanEntireInbox() – Scanner hele indbakken (alle mails, både læste og ulæste) og behandler dem,
+ * hvis de ligner Vinted-, DBA- eller Tradera-mails.
+ */
+function scanEntireInbox() {
+  Logger.log("Starter scanning af hele indbakken …");
+  var threads = GmailApp.search("in:inbox");
+  Logger.log("Fundet " + threads.length + " tråde i indbakken.");
+  
+  for (var i = 0; i < threads.length; i++) {
+    var messages = threads[i].getMessages();
+    for (var j = 0; j < messages.length; j++) {
+      var msg = messages[j];
+      var subject = msg.getSubject();
+      var content = msg.getPlainBody();
+      
+      if (content.includes("Din Vinted købskvittering") || content.includes("Din kvittering for")) {
+        Logger.log("Vinted-mail fundet: " + subject);
+        processVintedMail(msg);
+      } else if (subject.indexOf("DBA") !== -1 || content.indexOf("DBA") !== -1) {
+        Logger.log("DBA-mail fundet: " + subject);
+        processDbaMail(msg);
+      } else if (subject.indexOf("Tradera") !== -1 || content.indexOf("Tradera") !== -1) {
+        Logger.log("Tradera-mail fundet: " + subject);
+        processTraderaMail(msg);
+      }
+      msg.markRead();
+    }
+  }
+  Logger.log("Færdig med scanning af hele indbakken.");
+}
+
+/***********************************************************
+ * PROCESSERING AF ENKELTE MAILTYPER
+ ***********************************************************/
+
+/* Behandler Vinted-mails */
+function processVintedMail(msg) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  var content = msg.getPlainBody();
+  Logger.log("Behandler Vinted-mail: " + msg.getSubject());
+  if (content.includes("Din Vinted købskvittering") || content.includes("Din kvittering for")) {
+    var tid = extractTransactionId(content);
+    var date = extractPurchaseDate(content);
+    var price = extractPurchasePrice(content);
+    var name = extractItemName(content);
+    Logger.log("Overfører Vinted-data: Transaktions-id=" + tid + ", Dato=" + date + ", Pris=" + price + ", Vare=" + name);
+    var existing = findRowByTransactionId(sheet, tid);
+    var row = (existing != -1) ? existing : getFirstEmptyRow(sheet);
+    sheet.getRange(row, 1).setValue(tid);
+    sheet.getRange(row, 2).setValue(date);
+    sheet.getRange(row, 3).setValue(price);
+    sheet.getRange(row, 4).setValue(name);
+    sheet.getRange(row, 7).setValue("På lager");
+    sheet.getRange(row, 12).setValue("Vinted");
+  }
+}
+
+/* Behandler DBA-mails (salg) */
+function processDbaMail(msg) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  var content = msg.getPlainBody();
+  var htmlContent = msg.getBody();
+  var subject = msg.getSubject();
+  Logger.log("Behandler DBA-mail: " + subject);
+  
+  var product = extractDbaProductName(content, subject);
+  if (!product.toLowerCase().includes("chromecast") && !product.toLowerCase().includes("apple tv")) {
+    var alt = detectLikelyProductInBody(content);
+    if (alt) product = alt;
+  }
+  product = guessChromecastModel(product);
+  Logger.log("DBA – Fundet varenavn: " + product);
+  
+  var saleDate = msg.getDate();
+  var row = findFirstUnsoldRowByProductName(sheet, product);
+  if (row === -1) {
+    row = getFirstEmptyRow(sheet);
+    Logger.log("Ingen unsolgt række fundet for " + product + ", opretter ny række " + row);
+  }
+  
+  Logger.log("Overfører salgsdata til række " + row + " for '" + product + "'.");
+  sheet.getRange(row, 5).setValue(saleDate);
+  sheet.getRange(row, 7).setValue("Solgt");
+  sheet.getRange(row, 11).setValue("DBA");
+  
+  var code = extractShippingCode(content);
+  if (!code) {
+    code = parseInlineQrImage(htmlContent);
+  }
+  if (!code) {
+    code = getQRCodeAttachmentUrl(msg);
+  }
+  if (code && isValidShippingCode(code)) {
+    Logger.log("Overfører QR-/DAO-kode: " + code);
+    sheet.getRange(row, 10).setValue(code);
+    if (content.toLowerCase().includes("gls")) {
+      sheet.getRange(row, 9).setValue("GLS");
+    } else {
+      sheet.getRange(row, 9).setValue("DAO");
+    }
+  } else {
+    Logger.log("Ingen (gyldig) QR-/DAO-kode fundet i mailen. Code=" + code);
+  }
+}
+
+/* Behandler Tradera-mails (køb) */
+function processTraderaMail(msg) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  var content = msg.getPlainBody();
+  var subject = msg.getSubject();
+  Logger.log("Behandler Tradera-mail: " + subject);
+  
+  var orderNumber = extractTraderaOrderNumber(content);
+  var productNameRaw = extractTraderaProductFromSubject(subject);
+  var productName = guessChromecastModel(productNameRaw);
+  var totalMatch = content.match(/Total beløb:\s*([\d.,]+)\s*([A-Z]{2,4})/i);
+  var totalAmount = "";
+  if (totalMatch) {
+    var numeric = parseFloat(totalMatch[1].replace(",", "."));
+    var currency = totalMatch[2].toUpperCase();
+    totalAmount = numeric + " " + currency;
+  }
+  var shipping = extractShippingProvider(content) || "GLS";
+  Logger.log("Tradera – Overfører: Ordrenr=" + orderNumber + ", Beløb=" + totalAmount + ", Vare=" + productName + ", Fragt=" + shipping);
+  var existing = findRowByTransactionId(sheet, orderNumber);
+  var row = (existing != -1) ? existing : getFirstEmptyRow(sheet);
+  sheet.getRange(row, 1).setValue(orderNumber);
+  sheet.getRange(row, 2).setValue(msg.getDate());
+  sheet.getRange(row, 3).setValue(totalAmount);
+  sheet.getRange(row, 4).setValue(productName);
+  sheet.getRange(row, 9).setValue(shipping);
+  sheet.getRange(row, 12).setValue("Tradera");
+}
+
+/***********************************************************
+ * SCANNER MAILS – TJEK FUNKTIONER (aktiv/arkiveret)
+ ***********************************************************/
+function checkVintedMails(includeArchived) {
+  Logger.log("Nu tjekkes Vinted-mails for køb/annullering …");
+  var labelName = "Vinted Transaktioner";
+  var archiveLabelName = "Arkiveret - Script";
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  var threads;
+  if (includeArchived) {
+    var query = 'label:"' + labelName + '" OR label:"' + archiveLabelName + '"';
+    threads = GmailApp.search(query);
+  } else {
+    var label = GmailApp.getUserLabelByName(labelName);
+    threads = label ? label.getThreads() : [];
+  }
+  Logger.log("Fundet " + threads.length + " Vinted-mails.");
+  for (var i = 0; i < threads.length; i++) {
+    var messages = threads[i].getMessages();
+    for (var j = 0; j < messages.length; j++) {
+      var msg = messages[j];
+      var content = msg.getPlainBody();
+      Logger.log("Vinted-mail: " + msg.getSubject());
+      
+      if (content.includes("Din Vinted købskvittering") || content.includes("Din kvittering for")) {
+        var tid = extractTransactionId(content);
+        var date = extractPurchaseDate(content);
+        var price = extractPurchasePrice(content);
+        var name = extractItemName(content);
+        Logger.log("Overfører Vinted-data: Transaktions-id=" + tid + ", Dato=" + date + ", Pris=" + price + ", Vare=" + name);
+        var existing = findRowByTransactionId(sheet, tid);
+        var row = (existing != -1) ? existing : getFirstEmptyRow(sheet);
+        sheet.getRange(row, 1).setValue(tid);
+        sheet.getRange(row, 2).setValue(date);
+        sheet.getRange(row, 3).setValue(price);
+        sheet.getRange(row, 4).setValue(name);
+        sheet.getRange(row, 7).setValue("På lager");
+        sheet.getRange(row, 12).setValue("Vinted");
+      }
+      else if (content.toLowerCase().includes("annulleret") || content.toLowerCase().includes("refundering")) {
+        var tid2 = extractTransactionId(content);
+        var row2 = findRowByTransactionId(sheet, tid2);
+        if (row2 !== -1) {
+          Logger.log("Markerer transaktions-id " + tid2 + " som annulleret.");
+          sheet.getRange(row2, 7).setValue("Annulleret");
+        } else {
+          Logger.log("Kunne ikke finde transaktions-id " + tid2 + " for annullering.");
+        }
+      }
+    }
+    threads[i].removeLabel(GmailApp.getUserLabelByName(labelName));
+    threads[i].addLabel(GmailApp.getUserLabelByName(archiveLabelName));
+    threads[i].markRead();
+  }
+  Logger.log("Færdig med Vinted-mails.");
+}
+
+function checkDbaMails(includeArchived) {
+  Logger.log("Nu tjekkes DBA-mails for salg …");
+  var labelName = "DBA Salg";
+  var archiveLabelName = "Arkiveret - Script";
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  var threads;
+  if (includeArchived) {
+    var query = 'label:"' + labelName + '" OR label:"' + archiveLabelName + '"';
+    threads = GmailApp.search(query);
+  } else {
+    var label = GmailApp.getUserLabelByName(labelName);
+    threads = label ? label.getThreads() : [];
+  }
+  Logger.log("Fundet " + threads.length + " DBA-mails.");
+  for (var i = 0; i < threads.length; i++) {
+    var messages = threads[i].getMessages();
+    for (var j = 0; j < messages.length; j++) {
+      var msg = messages[j];
+      var content = msg.getPlainBody();
+      var htmlContent = msg.getBody();
+      var subject = msg.getSubject();
+      Logger.log("DBA-mail: " + subject);
+      var product = extractDbaProductName(content, subject);
+      if (!product.toLowerCase().includes("chromecast") && !product.toLowerCase().includes("apple tv")) {
+        var alt = detectLikelyProductInBody(content);
+        if (alt) product = alt;
+      }
+      product = guessChromecastModel(product);
+      Logger.log("DBA – Fundet varenavn: " + product);
+      var saleDate = msg.getDate();
+      var row = findFirstUnsoldRowByProductName(sheet, product);
+      if (row === -1) {
+        row = getFirstEmptyRow(sheet);
+        Logger.log("Ingen unsolgt række fundet for " + product + ", opretter ny række " + row);
+      }
+      Logger.log("Overfører salgsdata til række " + row + " for '" + product + "'.");
+      sheet.getRange(row, 5).setValue(saleDate);
+      sheet.getRange(row, 7).setValue("Solgt");
+      sheet.getRange(row, 11).setValue("DBA");
+      var code = extractShippingCode(content);
+      if (!code) {
+        code = parseInlineQrImage(htmlContent);
+      }
+      if (!code) {
+        code = getQRCodeAttachmentUrl(msg);
+      }
+      if (code && isValidShippingCode(code)) {
+        Logger.log("Overfører QR-/DAO-kode: " + code);
+        sheet.getRange(row, 10).setValue(code);
+        if (content.toLowerCase().includes("gls")) {
+          sheet.getRange(row, 9).setValue("GLS");
+        } else {
+          sheet.getRange(row, 9).setValue("DAO");
+        }
+      } else {
+        Logger.log("Ingen (gyldig) QR-/DAO-kode fundet i mailen. Code=" + code);
+      }
+      threads[i].removeLabel(GmailApp.getUserLabelByName(labelName));
+      threads[i].addLabel(GmailApp.getUserLabelByName(archiveLabelName));
+      threads[i].markRead();
+    }
+  }
+  Logger.log("Færdig med DBA-mails.");
+}
+
+function checkTraderaMails(includeArchived) {
+  Logger.log("Nu tjekkes Tradera-mails for køb …");
+  var labelName = "Tradera";
+  var archiveLabelName = "Arkiveret - Script";
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  var threads;
+  if (includeArchived) {
+    var query = 'label:"' + labelName + '" OR label:"' + archiveLabelName + '"';
+    threads = GmailApp.search(query);
+  } else {
+    var label = GmailApp.getUserLabelByName(labelName);
+    threads = label ? label.getThreads() : [];
+  }
+  Logger.log("Fundet " + threads.length + " Tradera-mails.");
+  for (var i = 0; i < threads.length; i++) {
+    var messages = threads[i].getMessages();
+    for (var j = 0; j < messages.length; j++) {
+      var msg = messages[j];
+      if (msg.isUnread()) {
+        var subject = msg.getSubject();
+        var content = msg.getPlainBody();
+        Logger.log("Tradera-mail: " + subject);
+        var orderNumber = extractTraderaOrderNumber(content);
+        var productNameRaw = extractTraderaProductFromSubject(subject);
+        var productName = guessChromecastModel(productNameRaw);
+        var totalMatch = content.match(/Total beløb:\s*([\d.,]+)\s*([A-Z]{2,4})/i);
+        var totalAmount = "";
+        if (totalMatch) {
+          var numeric = parseFloat(totalMatch[1].replace(",", "."));
+          var currency = totalMatch[2].toUpperCase();
+          totalAmount = numeric + " " + currency;
+        }
+        var shipping = extractShippingProvider(content) || "GLS";
+        Logger.log("Tradera – Overfører: Ordrenr=" + orderNumber + ", Beløb=" + totalAmount + ", Vare=" + productName + ", Fragt=" + shipping);
+        var existing = findRowByTransactionId(sheet, orderNumber);
+        var row = (existing != -1) ? existing : getFirstEmptyRow(sheet);
+        sheet.getRange(row, 1).setValue(orderNumber);
+        sheet.getRange(row, 2).setValue(msg.getDate());
+        sheet.getRange(row, 3).setValue(totalAmount);
+        sheet.getRange(row, 4).setValue(productName);
+        sheet.getRange(row, 9).setValue(shipping);
+        sheet.getRange(row, 12).setValue("Tradera");
+      }
+    }
+    threads[i].removeLabel(GmailApp.getUserLabelByName(labelName));
+    threads[i].addLabel(GmailApp.getUserLabelByName(archiveLabelName));
+  }
+  Logger.log("Færdig med Tradera-mails.");
+}
+
+/***********************************************************
+ * CONDITIONAL FORMATTING & DASHBOARD FUNCTIONS
+ ***********************************************************/
+
+/* Sætter conditional formatting for status i Ark1 */
+function setupConditionalFormatting() {
+  Logger.log("Indstiller conditional formatting i Ark1…");
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  if (!sheet) {
+    Logger.log("Ark 'Ark1' ikke fundet.");
+    return;
+  }
+  var range = sheet.getRange("G:G");
+  var rules = [
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("På lager")
+      .setBackground("#C6EFCE")
+      .setRanges([range])
+      .build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("Solgt")
+      .setBackground("#C9DAF8")
+      .setRanges([range])
+      .build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("Annulleret")
+      .setBackground("#F4CCCC")
+      .setRanges([range])
+      .build()
+  ];
+  sheet.setConditionalFormatRules(rules);
+  Logger.log("Conditional formatting sat.");
+}
+
+/* Opdaterer Dashboard med statusoversigt og månedlige tal */
+function updateDashboard() {
+  Logger.log("Opdaterer Dashboard…");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("Ark1");
+  var dash = ss.getSheetByName("Dashboard");
+  if (!sheet || !dash) {
+    Logger.log("Ark 'Ark1' eller 'Dashboard' ikke fundet.");
+    return;
+  }
+  
+  var data = sheet.getDataRange().getValues();
+  var counts = { paLager: 0, solgt: 0, annulleret: 0 };
+  var monthlyProfit = {};
+  var monthlyTurnover = {};
+  
+  for (var i = 1; i < data.length; i++) {
+    var status = String(data[i][6]).toLowerCase();
+    if (status === "på lager") {
+      counts.paLager++;
+    } else if (status === "solgt") {
+      counts.solgt++;
+      var saleDate = data[i][4];
+      var profit   = parseFloat(data[i][12]) || 0;
+      var turnover = parseFloat(data[i][5]) || 0;
+      if (saleDate) {
+        var monthStr = Utilities.formatDate(new Date(saleDate), Session.getScriptTimeZone(), "MMMM yyyy");
+        if (!monthlyProfit[monthStr]) monthlyProfit[monthStr] = 0;
+        monthlyProfit[monthStr] += profit;
+        if (!monthlyTurnover[monthStr]) monthlyTurnover[monthStr] = 0;
+        monthlyTurnover[monthStr] += turnover;
+      }
+    } else if (status === "annulleret") {
+      counts.annulleret++;
+    }
+  }
+  
+  dash.getRange("A1").setValue("Status Oversigt");
+  dash.getRange("A2").setValue("På lager");
+  dash.getRange("B2").setValue(counts.paLager);
+  dash.getRange("A3").setValue("Solgt");
+  dash.getRange("B3").setValue(counts.solgt);
+  dash.getRange("A4").setValue("Annulleret");
+  dash.getRange("B4").setValue(counts.annulleret);
+  
+  dash.getRange("A6").setValue("Sidst opdateret:");
+  dash.getRange("B6").setValue(new Date());
+  
+  var combinedData = [["Måned", "Fortjeneste", "Omsætning"]];
+  for (var m in monthlyProfit) {
+    combinedData.push([m, monthlyProfit[m], monthlyTurnover[m] || 0]);
+  }
+  combinedData = [combinedData[0]].concat(
+    combinedData.slice(1).sort(function(a, b) {
+      return new Date(a[0]) - new Date(b[0]);
+    })
+  );
+  
+  var startRow = 8;
+  dash.getRange(startRow, 1, dash.getMaxRows() - startRow + 1, 3).clearContent();
+  dash.getRange(startRow, 1, combinedData.length, 3).setValues(combinedData);
+  Logger.log("Dashboard opdateret med data: " + JSON.stringify(combinedData));
+}
+
+/* Anvender overstregning for annullerede varer i Ark1 */
+function applyStrikethroughToCancelled() {
+  Logger.log("Anvender overstregning for annullerede varer i Ark1…");
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  if (!sheet) {
+    Logger.log("Ark 'Ark1' ikke fundet.");
+    return;
+  }
+  
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  var data = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var status = String(data[i][6]).toLowerCase();
+    var cell = sheet.getRange(i + 2, 3); // Købspris
+    if (status === "annulleret") {
+      cell.setFontLine("line-through");
+    } else {
+      cell.setFontLine("none");
+    }
+  }
+  Logger.log("Overstregning anvendt.");
+}
+
+/* Formaterer Ark1 – opsætning af overskrifter og kolonnebredder */
+function formatArk1() {
+  Logger.log("Formaterer Ark1…");
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
+  if (!sheet) {
+    Logger.log("Ark 'Ark1' ikke fundet.");
+    return;
+  }
+  
+  var headers = [
+    "Transaktions-/ordrenummer", // A
+    "Købsdato",                  // B
+    "Købspris",                  // C
+    "Varenavn",                  // D
+    "Salgsdato",                 // E
+    "Salgspris",                 // F
+    "Status",                    // G
+    "",                          // H
+    "Fragtleverandør",           // I
+    "DAO-/QR-kode",              // J
+    "Salgsplatform",             // K
+    "Købsplatform",              // L
+    "Fortjeneste"                // M
+  ];
+  sheet.getRange("A1:M1").setValues([headers]);
+  sheet.getRange("A1:M1").setFontWeight("bold");
+  sheet.getRange("A1:M1").setHorizontalAlignment("CENTER");
+  sheet.setFrozenRows(1);
+  
+  sheet.setColumnWidth(1, 150);
+  sheet.setColumnWidth(2, 100);
+  sheet.setColumnWidth(3, 100);
+  sheet.setColumnWidth(4, 200);
+  sheet.setColumnWidth(5, 100);
+  sheet.setColumnWidth(6, 100);
+  sheet.setColumnWidth(7, 90);
+  sheet.setColumnWidth(8, 50);
+  sheet.setColumnWidth(9, 140);
+  sheet.setColumnWidth(10, 150);
+  sheet.setColumnWidth(11, 120);
+  sheet.setColumnWidth(12, 120);
+  sheet.setColumnWidth(13, 120);
+  
+  sheet.getRange("B2:B").setNumberFormat("dd/mm/yyyy");
+  sheet.getRange("E2:E").setNumberFormat("dd/mm/yyyy");
+  sheet.getRange("C2:C").setNumberFormat("#,##0.00");
+  sheet.getRange("F2:F").setNumberFormat("#,##0.00");
+  sheet.getRange("M2:M").setNumberFormat("#,##0.00");
+  
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    for (var row = 2; row <= lastRow; row++) {
+      var formula = "=IF($G" + row + "=\"Annulleret\"; \"\"; IF(AND(LEN($C" + row + ")>0;LEN($F" + row + ")>0); $F" + row + "-$C" + row + "; \"\"))";
+      sheet.getRange(row, 13).setFormula(formula);
+    }
+  }
+  Logger.log("Ark1 formateret.");
+}
+
+/* Formaterer Dashboard med diagrammer */
+function formatDashboard() {
+  Logger.log("Formaterer Dashboard…");
+  var dash = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dashboard");
+  if (!dash) {
+    Logger.log("Ark 'Dashboard' ikke fundet.");
+    return;
+  }
+  
+  var charts = dash.getCharts();
+  for (var i = 0; i < charts.length; i++) {
+    dash.removeChart(charts[i]);
+  }
+  
+  var chart1 = dash.newChart()
+    .asPieChart()
+    .addRange(dash.getRange("A2:B4"))
+    .setPosition(8, 1, 0, 0)
+    .setOption("title", "Fordeling af Status")
+    .build();
+  dash.insertChart(chart1);
+  
+  var lastRow = dash.getLastRow();
+  if (lastRow >= 8) {
+    var range = dash.getRange("A8:C" + lastRow);
+    var chart2 = dash.newChart()
+      .asColumnChart()
+      .addRange(range)
+      .setPosition(8, 8, 0, 0)
+      .setOption("title", "Fortjeneste og Omsætning pr. måned")
+      .build();
+    dash.insertChart(chart2);
+  }
+  Logger.log("Dashboard formateret.");
+}
+
+/***********************************************************
+ * HELPER-FUNKTIONER TIL MAILPROCESSERING
+ ***********************************************************/
+
+/* VINTED-funktioner */
+function extractItemName(content) {
+  var regex1 = /\*Ordre:\*\s*([\s\S]+?)(?:\*Betalt:\*|Betalt:)/i;
+  var regex2 = /Ordre:\s*([\s\S]+?)(?:Betalt:)/i;
+  var match = content.match(regex1) || content.match(regex2);
+  var rawName = match ? match[1].trim() : "";
+  Logger.log("Vinted – Fundet varenavn: " + rawName);
+  return guessChromecastModel(rawName);
+}
+
+function extractPurchasePrice(content) {
+  var match = content.match(/\*?Betalt:\*?\s*([\d.,]+)\s*kr\./i);
+  if (match) {
+    var priceStr = match[1];
+    if (priceStr.indexOf(",") > -1 && priceStr.indexOf(".") > -1) {
+      if (priceStr.lastIndexOf(",") > priceStr.lastIndexOf(".")) {
+        priceStr = priceStr.replace(/\./g, "").replace(/,/g, ".");
+      } else {
+        priceStr = priceStr.replace(/,/g, "");
+      }
+    } else if (priceStr.indexOf(",") > -1) {
+      if (priceStr.length > 4) {
+        priceStr = priceStr.replace(/,/g, "");
+      } else {
+        priceStr = priceStr.replace(/,/g, ".");
+      }
+    }
+    return parseFloat(priceStr);
+  }
+  return "";
+}
+
+function extractPurchaseDate(content) {
+  var match = content.match(/\*?Betalingsdato:\*?\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})\s+(MORGEN|EFTERMIDDAG)/i);
+  if (match) {
+    var date = match[1];
+    var time = match[2];
+    var period = match[3];
+    var englishPeriod = (period === "MORGEN") ? "AM" : "PM";
+    var dateTime = date + " " + time + " " + englishPeriod;
+    var dateObj = new Date(dateTime.replace(/(\d{2})\/(\d{2})\/(\d{4})/, "$2/$1/$3"));
+    return dateObj;
+  }
+  return "";
+}
+
+function extractTransactionId(content) {
+  return extractWithRegex(content, /\*?Transaktions-id:\*?\s*(\d+)/i);
+}
+
+/* TRADERA-funktioner */
+function extractTraderaOrderNumber(content) {
+  var regex = /Ordrenummer\s*(\d+)/i;
+  var match = content.match(regex);
+  return match ? match[1].trim() : "";
+}
+
+function extractTraderaProductFromSubject(subject) {
+  var regex = /-\s*(.*?)\s*\(/;
+  var match = subject.match(regex);
+  if (match) return match[1].trim();
+  return subject.trim();
+}
+
+/* DBA-funktioner */
+function extractDbaProductName(content, subject) {
+  var regex = /Pak\s*["'«]([^"'»]+)["'»]/i;
+  var match = content.match(regex);
+  if (match) {
+    return match[1].trim();
+  } else {
+    return subject.trim();
+  }
+}
+
+/* GENERELLE HELPER-FUNKTIONER */
+function extractWithRegex(content, regex) {
+  var match = content.match(regex);
+  return match ? match[1].trim() : "";
+}
+
+function detectLikelyProductInBody(content) {
+  var lower = content.toLowerCase();
+  if (lower.includes("chromecast 3")) return "Chromecast 3";
+  if (lower.includes("chromecast 2")) return "Chromecast 2";
+  if (lower.includes("apple tv")) return "Apple TV";
+  if (lower.includes("chromecast")) return "Chromecast";
+  return "";
+}
+
+function guessChromecastModel(rawName) {
+  var lower = rawName.toLowerCase().trim().replace(/^google\s+/, "");
+  if (lower.includes("apple tv")) return "Apple TV";
+  if (lower.includes("chromecast")) {
+    if (lower.includes("hd")) return "Chromecast HD";
+    if (lower.includes("4k")) return "Chromecast 4K";
+    if (lower.includes("2")) return "Chromecast 2";
+    if (lower.includes("3")) return "Chromecast 3";
+    return "Chromecast";
+  }
+  return rawName;
+}
+
+function findRowByTransactionId(sheet, id) {
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(id)) {
+      return i + 1;
+    }
+  }
+  return -1;
+}
+
+function findFirstUnsoldRowByProductName(sheet, productName) {
+  var norm = guessChromecastModel(productName).toLowerCase();
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    var val = data[i][3];
+    var status = data[i][6] ? data[i][6].toLowerCase().trim() : "";
+    if (val && status === "på lager") {
+      var normVal = guessChromecastModel(String(val)).toLowerCase();
+      if (normVal.indexOf(norm) !== -1 || norm.indexOf(normVal) !== -1) {
+        return i + 1;
+      }
+    }
+  }
+  return -1;
+}
+
+function findRowByProductName(sheet, productName) {
+  var norm = guessChromecastModel(productName).toLowerCase();
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    var val = data[i][3];
+    var status = data[i][6] ? data[i][6].toLowerCase().trim() : "";
+    if (val && status === "på lager") {
+      var normVal = guessChromecastModel(String(val)).toLowerCase();
+      if (normVal.indexOf(norm) !== -1 || norm.indexOf(normVal) !== -1) {
+        return i + 1;
+      }
+    }
+  }
+  Logger.log("Ingen match for: " + productName);
+  return -1;
+}
+
+function logDebug(fnName, msg) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Debug");
+  if (!sheet) {
+    Logger.log("FEJL (" + fnName + "): " + msg);
+    return;
+  }
+  var row = sheet.getLastRow() + 1;
+  sheet.getRange(row, 1).setValue(new Date());
+  sheet.getRange(row, 2).setValue(fnName);
+  sheet.getRange(row, 3).setValue(msg);
+}
+
+function getFirstEmptyRow(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 2;
+  var data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (!data[i][0]) return i + 2;
+  }
+  return lastRow + 1;
+}
+
+function extractTraderaOrderNumber(content) {
+  var regex = /Ordrenummer\s*(\d+)/i;
+  var match = content.match(regex);
+  return match ? match[1].trim() : "";
+}
+
+function extractTraderaProductFromSubject(subject) {
+  var regex = /-\s*(.*?)\s*\(/;
+  var match = subject.match(regex);
+  if (match) return match[1].trim();
+  return subject.trim();
+}
