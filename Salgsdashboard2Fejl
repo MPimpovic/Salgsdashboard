@@ -1,9 +1,5 @@
 /**
  * onOpen() – Tilføjer en brugerdefineret menu til regnearket.
- * Menuen har tre muligheder:
- *   • "Scan nye mails" – Scanner kun mails med de aktive labels.
- *   • "Refresh alle mails (inkluder arkiverede)" – Scanner også mails med label "Arkiveret - Script".
- *   • "Scan hele indbakken" – Scanner alle mails i indbakken (læs og ulæs).
  */
 function onOpen() {
   var ui = SpreadsheetApp.getUi();
@@ -19,7 +15,6 @@ function onOpen() {
  */
 function scanAllMails() {
   Logger.log("Starter scanning af nye mails…");
-  
   checkVintedMails(false);
   checkDbaMails(false);
   checkTraderaMails(false);
@@ -30,7 +25,6 @@ function scanAllMails() {
   applyStrikethroughToCancelled();
   formatArk1();
   formatDashboard();
-  
   Logger.log("Færdig med scanning af nye mails.");
 }
 
@@ -39,7 +33,6 @@ function scanAllMails() {
  */
 function refreshAllMails() {
   Logger.log("Starter refresh – scanner alle mails (inkluderede arkiverede) …");
-  
   checkVintedMails(true);
   checkDbaMails(true);
   checkTraderaMails(true);
@@ -50,13 +43,11 @@ function refreshAllMails() {
   applyStrikethroughToCancelled();
   formatArk1();
   formatDashboard();
-  
   Logger.log("Refresh færdig – alle mails er scannet.");
 }
 
 /**
- * scanEntireInbox() – Scanner hele indbakken (alle mails, både læste og ulæste) og behandler dem,
- * hvis de ligner Vinted-, DBA- eller Tradera-mails.
+ * scanEntireInbox() – Scanner hele indbakken og behandler mails, der matcher Vinted, DBA eller Tradera.
  */
 function scanEntireInbox() {
   Logger.log("Starter scanning af hele indbakken …");
@@ -90,11 +81,13 @@ function scanEntireInbox() {
  * PROCESSERING AF ENKELTE MAILTYPER
  ***********************************************************/
 
-/* Behandler Vinted-mails */
+/* Behandler Vinted-mails (køb og annullering) */
 function processVintedMail(msg) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
   var content = msg.getPlainBody();
   Logger.log("Behandler Vinted-mail: " + msg.getSubject());
+  
+  // Hvis mailen indeholder købskvittering
   if (content.includes("Din Vinted købskvittering") || content.includes("Din kvittering for")) {
     var tid = extractTransactionId(content);
     var date = extractPurchaseDate(content);
@@ -109,6 +102,17 @@ function processVintedMail(msg) {
     sheet.getRange(row, 4).setValue(name);
     sheet.getRange(row, 7).setValue("På lager");
     sheet.getRange(row, 12).setValue("Vinted");
+  }
+  // Hvis mailen angiver annullering/refundering
+  else if (content.toLowerCase().includes("annulleret") || content.toLowerCase().includes("refundering")) {
+    var tid2 = extractTransactionId(content);
+    var row2 = findRowByTransactionId(sheet, tid2);
+    if (row2 !== -1) {
+      Logger.log("Markerer transaktions-id " + tid2 + " som annulleret.");
+      sheet.getRange(row2, 7).setValue("Annulleret");
+    } else {
+      Logger.log("Kunne ikke finde transaktions-id " + tid2 + " for annullering.");
+    }
   }
 }
 
@@ -140,6 +144,7 @@ function processDbaMail(msg) {
   sheet.getRange(row, 7).setValue("Solgt");
   sheet.getRange(row, 11).setValue("DBA");
   
+  // Udtræk shipping-kode (DAO- eller QR-kode) med de opdaterede mønstre
   var code = extractShippingCode(content);
   if (!code) {
     code = parseInlineQrImage(htmlContent);
@@ -147,14 +152,19 @@ function processDbaMail(msg) {
   if (!code) {
     code = getQRCodeAttachmentUrl(msg);
   }
+  
+  // Bestem fragtleverandør ud fra mailens indhold
+  var provider = "";
+  if (content.toLowerCase().indexOf("dao indleveringskode") !== -1) {
+    provider = "DAO";
+  } else if (content.toLowerCase().indexOf("qr-kode") !== -1) {
+    provider = "GLS";
+  }
+  
   if (code && isValidShippingCode(code)) {
     Logger.log("Overfører QR-/DAO-kode: " + code);
     sheet.getRange(row, 10).setValue(code);
-    if (content.toLowerCase().includes("gls")) {
-      sheet.getRange(row, 9).setValue("GLS");
-    } else {
-      sheet.getRange(row, 9).setValue("DAO");
-    }
+    sheet.getRange(row, 9).setValue(provider);
   } else {
     Logger.log("Ingen (gyldig) QR-/DAO-kode fundet i mailen. Code=" + code);
   }
@@ -292,14 +302,16 @@ function checkDbaMails(includeArchived) {
       if (!code) {
         code = getQRCodeAttachmentUrl(msg);
       }
+      var provider = "";
+      if (content.toLowerCase().indexOf("dao indleveringskode") !== -1) {
+        provider = "DAO";
+      } else if (content.toLowerCase().indexOf("qr-kode") !== -1) {
+        provider = "GLS";
+      }
       if (code && isValidShippingCode(code)) {
         Logger.log("Overfører QR-/DAO-kode: " + code);
         sheet.getRange(row, 10).setValue(code);
-        if (content.toLowerCase().includes("gls")) {
-          sheet.getRange(row, 9).setValue("GLS");
-        } else {
-          sheet.getRange(row, 9).setValue("DAO");
-        }
+        sheet.getRange(row, 9).setValue(provider);
       } else {
         Logger.log("Ingen (gyldig) QR-/DAO-kode fundet i mailen. Code=" + code);
       }
@@ -364,8 +376,6 @@ function checkTraderaMails(includeArchived) {
 /***********************************************************
  * CONDITIONAL FORMATTING & DASHBOARD FUNCTIONS
  ***********************************************************/
-
-/* Sætter conditional formatting for status i Ark1 */
 function setupConditionalFormatting() {
   Logger.log("Indstiller conditional formatting i Ark1…");
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
@@ -395,7 +405,6 @@ function setupConditionalFormatting() {
   Logger.log("Conditional formatting sat.");
 }
 
-/* Opdaterer Dashboard med statusoversigt og månedlige tal */
 function updateDashboard() {
   Logger.log("Opdaterer Dashboard…");
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -459,7 +468,6 @@ function updateDashboard() {
   Logger.log("Dashboard opdateret med data: " + JSON.stringify(combinedData));
 }
 
-/* Anvender overstregning for annullerede varer i Ark1 */
 function applyStrikethroughToCancelled() {
   Logger.log("Anvender overstregning for annullerede varer i Ark1…");
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
@@ -483,7 +491,6 @@ function applyStrikethroughToCancelled() {
   Logger.log("Overstregning anvendt.");
 }
 
-/* Formaterer Ark1 – opsætning af overskrifter og kolonnebredder */
 function formatArk1() {
   Logger.log("Formaterer Ark1…");
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Ark1");
@@ -542,7 +549,6 @@ function formatArk1() {
   Logger.log("Ark1 formateret.");
 }
 
-/* Formaterer Dashboard med diagrammer */
 function formatDashboard() {
   Logger.log("Formaterer Dashboard…");
   var dash = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dashboard");
@@ -581,8 +587,6 @@ function formatDashboard() {
 /***********************************************************
  * HELPER-FUNKTIONER TIL MAILPROCESSERING
  ***********************************************************/
-
-/* VINTED-funktioner */
 function extractItemName(content) {
   var regex1 = /\*Ordre:\*\s*([\s\S]+?)(?:\*Betalt:\*|Betalt:)/i;
   var regex2 = /Ordre:\s*([\s\S]+?)(?:Betalt:)/i;
@@ -632,7 +636,6 @@ function extractTransactionId(content) {
   return extractWithRegex(content, /\*?Transaktions-id:\*?\s*(\d+)/i);
 }
 
-/* TRADERA-funktioner */
 function extractTraderaOrderNumber(content) {
   var regex = /Ordrenummer\s*(\d+)/i;
   var match = content.match(regex);
@@ -646,7 +649,6 @@ function extractTraderaProductFromSubject(subject) {
   return subject.trim();
 }
 
-/* DBA-funktioner */
 function extractDbaProductName(content, subject) {
   var regex = /Pak\s*["'«]([^"'»]+)["'»]/i;
   var match = content.match(regex);
@@ -657,7 +659,6 @@ function extractDbaProductName(content, subject) {
   }
 }
 
-/* GENERELLE HELPER-FUNKTIONER */
 function extractWithRegex(content, regex) {
   var match = content.match(regex);
   return match ? match[1].trim() : "";
@@ -750,15 +751,55 @@ function getFirstEmptyRow(sheet) {
   return lastRow + 1;
 }
 
-function extractTraderaOrderNumber(content) {
-  var regex = /Ordrenummer\s*(\d+)/i;
-  var match = content.match(regex);
-  return match ? match[1].trim() : "";
+/***********************************************************
+ * FUNKTIONER TIL UDTRÆK AF SHIPPING-KODE
+ ***********************************************************/
+function extractShippingCode(emailText) {
+  // Prøver først at udtrække en DAO-kode. Matcher "DAO indleveringskode er:" efterfulgt af tal og bindestreger.
+  var daoRegex = /DAO\s*(?:indleveringskode\s*er:)\s*([\d-]+)/i;
+  var daoMatch = emailText.match(daoRegex);
+  if (daoMatch) {
+    return daoMatch[1].trim();
+  }
+  // Hvis ikke DAO, prøv at udtrække en QR-kode. Matcher "QR-kode:" efterfulgt af en URL (evt. i [] ).
+  var qrRegex = /QR[-\s]*kode:\s*\[?(\S+)\]?/i;
+  var qrMatch = emailText.match(qrRegex);
+  if (qrMatch) {
+    return qrMatch[1].trim();
+  }
+  return "";
 }
 
-function extractTraderaProductFromSubject(subject) {
-  var regex = /-\s*(.*?)\s*\(/;
-  var match = subject.match(regex);
-  if (match) return match[1].trim();
-  return subject.trim();
+function isValidShippingCode(code) {
+  return code && code.trim().length > 0;
+}
+
+function parseInlineQrImage(htmlContent) {
+  var imgRegex = /<img[^>]+src="([^"]+)"[^>]*>/i;
+  var match = htmlContent.match(imgRegex);
+  if (match && match[1].toLowerCase().includes("qr")) {
+    return match[1];
+  }
+  return "";
+}
+
+function getQRCodeAttachmentUrl(msg) {
+  var attachments = msg.getAttachments();
+  for (var i = 0; i < attachments.length; i++) {
+    var attachment = attachments[i];
+    var mimeType = attachment.getContentType();
+    if (mimeType.indexOf("image/") !== -1) {
+      var file = DriveApp.createFile(attachment);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      return file.getUrl();
+    }
+  }
+  return "";
+}
+
+function extractShippingProvider(content) {
+  var lower = content.toLowerCase();
+  if (lower.includes("gls")) return "GLS";
+  if (lower.includes("dao")) return "DAO";
+  return "";
 }
