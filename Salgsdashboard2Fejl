@@ -471,179 +471,201 @@ function updateDashboard() {
       Logger.log("Ark 'Ark1' eller 'Dashboard' ikke fundet.");
       return;
     }
+
     var data = sheet.getDataRange().getValues();
-    var counts = { paLager: 0, solgt: 0, annulleret: 0 };
-    var monthlyProfit = {};
-    var monthlyTurnover = {};
-    var inStockCounts = {};
-    var bestROI = -Infinity;
-    var bestROIProduct = "";
-    var bestROIValue = 0;
-    var salesPerMonthProduct = {};
-    var cache = CacheService.getScriptCache();
-    var cachedSales = cache.get("salesPerMonthProduct");
-    if (cachedSales) {
-      salesPerMonthProduct = JSON.parse(cachedSales);
-    }
-    for (var i = 1; i < data.length; i++) {
-      var status = String(data[i][6]).toLowerCase();
-      var product = data[i][3];
-      if (status === "på lager") {
-        counts.paLager++;
-        if (product) { inStockCounts[product] = (inStockCounts[product] || 0) + 1; }
-      } else if (status === "solgt") {
-        counts.solgt++;
-        var saleDate = data[i][4];
-        var profit = parseFloat(data[i][12]) || 0;
-        var turnover = parseFloat(data[i][5]) || 0;
-        var purchasePrice = parseFloat(data[i][2]) || 0;
-        if (purchasePrice > 0) {
-          var roi = (profit / purchasePrice) * 100;
-          if (roi > bestROI) {
-            bestROI = roi;
-            bestROIProduct = product;
-            bestROIValue = Math.round(roi * 10) / 10;
-          }
-        }
-        if (saleDate) {
-          var monthStr = Utilities.formatDate(new Date(saleDate), Session.getScriptTimeZone(), "MMMM yyyy");
-          if (!monthlyProfit[monthStr]) { monthlyProfit[monthStr] = 0; }
-          monthlyProfit[monthStr] += profit;
-          if (!monthlyTurnover[monthStr]) { monthlyTurnover[monthStr] = 0; }
-          monthlyTurnover[monthStr] += turnover;
-          if (!salesPerMonthProduct[monthStr]) { salesPerMonthProduct[monthStr] = {}; }
-          salesPerMonthProduct[monthStr][product] = (salesPerMonthProduct[monthStr][product] || 0) + 1;
-        }
-      } else if (status === "annulleret") {
-        counts.annulleret++;
-      }
-    }
-    cache.put("salesPerMonthProduct", JSON.stringify(salesPerMonthProduct), 300);
-    
-    dash.getRange("A1").setValue("Status Oversigt");
-    dash.getRange("A2").setValue("På lager");
-    dash.getRange("B2").setValue(counts.paLager);
-    dash.getRange("A3").setValue("Solgt");
-    dash.getRange("B3").setValue(counts.solgt);
-    dash.getRange("A4").setValue("Annulleret");
-    dash.getRange("B4").setValue(counts.annulleret);
-    dash.getRange("A6").setValue("Sidst opdateret:");
-    dash.getRange("B6").setValue(new Date());
-    
-    var combinedData = [["Måned", "Fortjeneste", "Omsætning", "Profitmargin (%)"]];
-    for (var m in monthlyProfit) {
-      var profit = monthlyProfit[m];
-      var turnover = monthlyTurnover[m] || 0;
-      var margin = 0;
-      if (turnover > 0) {
-        margin = Math.round((profit / turnover) * 1000) / 10;
-      }
-      combinedData.push([m, profit, turnover, margin]);
-    }
-    combinedData = [combinedData[0]].concat(combinedData.slice(1).sort(function(a, b) {
-      return new Date(a[0]) - new Date(b[0]);
-    }));
-    
-    var startRow = 8;
-    dash.getRange(startRow, 1, 50, 3).clearContent();
-    dash.getRange(startRow, 1, combinedData.length, 3).setValues(
-      combinedData.map(function(row) { return row.slice(0, 3); })
-    );
-    
-    // Diagram for månedlig fortjeneste og omsætning – brug kun de 3 første kolonner
-    var chartDataRows = combinedData.length;
-    var chartRange = dash.getRange("A8:C" + (startRow - 1 + chartDataRows));
-    var existingCharts = dash.getCharts().filter(function(c) {
-      return c.getOptions().title === "Månedlig Fortjeneste og Omsætning";
-    });
-    if (existingCharts.length > 0) {
-      var builder = existingCharts[0].modify();
-      builder = builder.clearRanges().addRange(chartRange)
-          .setOption("title", "Månedlig Fortjeneste og Omsætning");
-      dash.updateChart(builder.build());
-    } else {
-      var chart = dash.newChart()
-          .asColumnChart()
-          .addRange(chartRange)
-          .setPosition(8, 1, 0, 0)
-          .setOption("title", "Månedlig Fortjeneste og Omsætning")
-          .build();
-      dash.insertChart(chart);
-    }
-    
-    // Sektion: Højeste ROI-vare
-    var roiHeaderRow = startRow + chartDataRows + 2;
-    dash.getRange(roiHeaderRow, 1).setValue("Højeste ROI-vare:");
-    dash.getRange(roiHeaderRow + 1, 1).setValue("Vare");
-    dash.getRange(roiHeaderRow + 1, 2).setValue("ROI (%)");
-    dash.getRange(roiHeaderRow + 2, 1).setValue(bestROIProduct);
-    dash.getRange(roiHeaderRow + 2, 2).setValue(bestROIValue + "%");
-    
-    // Sektion: Varer på lager
-    var stockHeaderRow = roiHeaderRow + 5;
-    dash.getRange(stockHeaderRow, 1).setValue("Varer på lager:");
-    var stockTable = [["Vare", "Antal"]];
-    for (var prod in inStockCounts) {
-      stockTable.push([prod, inStockCounts[prod]]);
-    }
-    dash.getRange(stockHeaderRow + 1, 1, 20, 2).clearContent();
-    dash.getRange(stockHeaderRow + 1, 1, stockTable.length, 2).setValues(stockTable);
-    
-    // Sektion: Salg pr. måned pr. produkt
-    var salesHeaderRow = stockHeaderRow + 22;
-    dash.getRange(salesHeaderRow, 1).setValue("Salg pr. måned (antal solgte varer pr. produkt):");
-    var allProducts = {};
-    for (var month in salesPerMonthProduct) {
-      for (var prod in salesPerMonthProduct[month]) {
-        allProducts[prod] = true;
-      }
-    }
-    var productList = Object.keys(allProducts).sort();
-    var salesTable = [];
-    var header = ["Måned"].concat(productList);
-    salesTable.push(header);
-    var months = Object.keys(salesPerMonthProduct).sort(function(a, b) {
-      return new Date(a) - new Date(b);
-    });
-    months.forEach(function(month) {
-      var row = [month];
-      productList.forEach(function(prod) {
-        var count = salesPerMonthProduct[month][prod] || 0;
-        row.push(count);
-      });
-      salesTable.push(row);
-    });
-    var salesTableRow = salesHeaderRow + 1;
-    dash.getRange(salesTableRow, 1, 30, productList.length + 1).clearContent();
-    dash.getRange(salesTableRow, 1, salesTable.length, productList.length + 1).setValues(salesTable);
-    
-    // Diagram for salg pr. måned pr. produkt (stacked column)
-    var salesChartRange = dash.getRange(salesHeaderRow, 1, salesTable.length, productList.length + 1);
-    var existingSalesCharts = dash.getCharts().filter(function(c) {
-      return c.getOptions().title === "Antal solgte varer pr. måned pr. produkt";
-    });
-    if (existingSalesCharts.length > 0) {
-      var builderSales = existingSalesCharts[0].modify();
-      builderSales = builderSales.clearRanges().addRange(salesChartRange)
-          .setOption("title", "Antal solgte varer pr. måned pr. produkt")
-          .setOption("isStacked", true);
-      dash.updateChart(builderSales.build());
-    } else {
-      var salesChart = dash.newChart()
-          .asColumnChart()
-          .addRange(salesChartRange)
-          .setPosition(salesTableRow + salesTable.length + 2, 1, 0, 0)
-          .setOption("title", "Antal solgte varer pr. måned pr. produkt")
-          .setOption("isStacked", true)
-          .build();
-      dash.insertChart(salesChart);
-    }
-    
-    Logger.log("Dashboard opdateret med data: " + JSON.stringify(combinedData));
-    Logger.log("Højeste ROI-vare: " + bestROIProduct + " med " + bestROIValue + "% ROI");
-  } catch(e) {
+    var stats = calculateStats(data);
+    updateDashboardSheet(dash, stats);
+    updateCharts(dash, stats);
+
+    Logger.log("Dashboard opdateret med data: " + JSON.stringify(stats.combinedData));
+    Logger.log("Højeste ROI-vare: " + stats.bestROIProduct + " med " + stats.bestROIValue + "% ROI");
+  } catch (e) {
     Logger.log("FEJL i updateDashboard: " + e);
     MailApp.sendEmail(ADMIN_EMAIL, "Fejl i updateDashboard", "Fejl: " + e + "\nStack:\n" + e.stack);
+  }
+}
+
+function calculateStats(data) {
+  var counts = { paLager: 0, solgt: 0, annulleret: 0 };
+  var monthlyProfit = {};
+  var monthlyTurnover = {};
+  var inStockCounts = {};
+  var bestROI = -Infinity;
+  var bestROIProduct = "";
+  var bestROIValue = 0;
+  var salesPerMonthProduct = {};
+  var cache = CacheService.getScriptCache();
+  var cachedSales = cache.get("salesPerMonthProduct");
+
+  if (cachedSales) {
+    salesPerMonthProduct = JSON.parse(cachedSales);
+  }
+
+  for (var i = 1; i < data.length; i++) {
+    var status = String(data[i][6]).toLowerCase();
+    var product = data[i][3];
+    if (status === "på lager") {
+      counts.paLager++;
+      if (product) { inStockCounts[product] = (inStockCounts[product] || 0) + 1; }
+    } else if (status === "solgt") {
+      counts.solgt++;
+      var saleDate = data[i][4];
+      var profit = parseFloat(data[i][12]) || 0;
+      var turnover = parseFloat(data[i][5]) || 0;
+      var purchasePrice = parseFloat(data[i][2]) || 0;
+      if (purchasePrice > 0) {
+        var roi = (profit / purchasePrice) * 100;
+        if (roi > bestROI) {
+          bestROI = roi;
+          bestROIProduct = product;
+          bestROIValue = Math.round(roi * 10) / 10;
+        }
+      }
+      if (saleDate) {
+        var monthStr = Utilities.formatDate(new Date(saleDate), Session.getScriptTimeZone(), "MMMM yyyy");
+        if (!monthlyProfit[monthStr]) { monthlyProfit[monthStr] = 0; }
+        monthlyProfit[monthStr] += profit;
+        if (!monthlyTurnover[monthStr]) { monthlyTurnover[monthStr] = 0; }
+        monthlyTurnover[monthStr] += turnover;
+        if (!salesPerMonthProduct[monthStr]) { salesPerMonthProduct[monthStr] = {}; }
+        salesPerMonthProduct[monthStr][product] = (salesPerMonthProduct[monthStr][product] || 0) + 1;
+      }
+    } else if (status === "annulleret") {
+      counts.annulleret++;
+    }
+  }
+
+  cache.put("salesPerMonthProduct", JSON.stringify(salesPerMonthProduct), 300);
+
+  var combinedData = [["Måned", "Fortjeneste", "Omsætning", "Profitmargin (%)"]];
+  for (var m in monthlyProfit) {
+    var profit = monthlyProfit[m];
+    var turnover = monthlyTurnover[m] || 0;
+    var margin = 0;
+    if (turnover > 0) {
+      margin = Math.round((profit / turnover) * 1000) / 10;
+    }
+    combinedData.push([m, profit, turnover, margin]);
+  }
+  combinedData = [combinedData[0]].concat(combinedData.slice(1).sort(function(a, b) {
+    return new Date(a[0]) - new Date(b[0]);
+  }));
+
+  return {
+    counts: counts,
+    combinedData: combinedData,
+    bestROIProduct: bestROIProduct,
+    bestROIValue: bestROIValue,
+    inStockCounts: inStockCounts,
+    salesPerMonthProduct: salesPerMonthProduct
+  };
+}
+
+function updateDashboardSheet(dash, stats) {
+  dash.getRange("A1").setValue("Status Oversigt");
+  dash.getRange("A2").setValue("På lager");
+  dash.getRange("B2").setValue(stats.counts.paLager);
+  dash.getRange("A3").setValue("Solgt");
+  dash.getRange("B3").setValue(stats.counts.solgt);
+  dash.getRange("A4").setValue("Annulleret");
+  dash.getRange("B4").setValue(stats.counts.annulleret);
+  dash.getRange("A6").setValue("Sidst opdateret:");
+  dash.getRange("B6").setValue(new Date());
+
+  var startRow = 8;
+  dash.getRange(startRow, 1, 50, 3).clearContent();
+  dash.getRange(startRow, 1, stats.combinedData.length, 3).setValues(
+    stats.combinedData.map(function(row) { return row.slice(0, 3); })
+  );
+
+  var roiHeaderRow = startRow + stats.combinedData.length + 2;
+  dash.getRange(roiHeaderRow, 1).setValue("Højeste ROI-vare:");
+  dash.getRange(roiHeaderRow + 1, 1).setValue("Vare");
+  dash.getRange(roiHeaderRow + 1, 2).setValue("ROI (%)");
+  dash.getRange(roiHeaderRow + 2, 1).setValue(stats.bestROIProduct);
+  dash.getRange(roiHeaderRow + 2, 2).setValue(stats.bestROIValue + "%");
+
+  var stockHeaderRow = roiHeaderRow + 5;
+  dash.getRange(stockHeaderRow, 1).setValue("Varer på lager:");
+  var stockTable = [["Vare", "Antal"]];
+  for (var prod in stats.inStockCounts) {
+    stockTable.push([prod, stats.inStockCounts[prod]]);
+  }
+  dash.getRange(stockHeaderRow + 1, 1, 20, 2).clearContent();
+  dash.getRange(stockHeaderRow + 1, 1, stockTable.length, 2).setValues(stockTable);
+
+  var salesHeaderRow = stockHeaderRow + 22;
+  dash.getRange(salesHeaderRow, 1).setValue("Salg pr. måned (antal solgte varer pr. produkt):");
+  var allProducts = {};
+  for (var month in stats.salesPerMonthProduct) {
+    for (var prod in stats.salesPerMonthProduct[month]) {
+      allProducts[prod] = true;
+    }
+  }
+  var productList = Object.keys(allProducts).sort();
+  var salesTable = [];
+  var header = ["Måned"].concat(productList);
+  salesTable.push(header);
+  var months = Object.keys(stats.salesPerMonthProduct).sort(function(a, b) {
+    return new Date(a) - new Date(b);
+  });
+  months.forEach(function(month) {
+    var row = [month];
+    productList.forEach(function(prod) {
+      var count = stats.salesPerMonthProduct[month][prod] || 0;
+      row.push(count);
+    });
+    salesTable.push(row);
+  });
+  dash.getRange(salesHeaderRow + 1, 1, 30, productList.length + 1).clearContent();
+  dash.getRange(salesHeaderRow + 1, 1, salesTable.length, productList.length + 1).setValues(salesTable);
+}
+
+function updateCharts(dash, stats) {
+  var startRow = 8;
+  var chartRange = dash.getRange("A8:C" + (startRow - 1 + stats.combinedData.length));
+
+  // Slet eksisterende diagram med titlen "Månedlig Fortjeneste og Omsætning"
+  var existingCharts = dash.getCharts().filter(function(c) {
+    return c.getOptions().title === "Månedlig Fortjeneste og Omsætning";
+  });
+  if (existingCharts.length > 0) {
+    Logger.log("Sletter eksisterende diagram med titlen 'Månedlig Fortjeneste og Omsætning'");
+    dash.removeChart(existingCharts[0]);
+  }
+
+  // Opret nyt diagram for månedlig fortjeneste og omsætning
+  Logger.log("Opretter nyt diagram 'Månedlig Fortjeneste og Omsætning'");
+  var chart = dash.newChart()
+      .asColumnChart()
+      .addRange(chartRange)
+      .setPosition(8, 1, 0, 0)
+      .setOption("title", "Månedlig Fortjeneste og Omsætning")
+      .setOption('legend', { position: 'bottom' })
+      .build();
+  dash.insertChart(chart);
+
+  // Diagram for salg pr. måned pr. produkt (stacked column)
+  var salesHeaderRow = startRow + stats.combinedData.length + 22;
+  var salesChartRange = dash.getRange(salesHeaderRow, 1, stats.combinedData.length, stats.combinedData[0].length + 1);
+  var existingSalesCharts = dash.getCharts().filter(function(c) {
+    return c.getOptions().title === "Antal solgte varer pr. måned pr. produkt";
+  });
+  if (existingSalesCharts.length > 0) {
+    var builderSales = existingSalesCharts[0].modify();
+    builderSales = builderSales.clearRanges().addRange(salesChartRange)
+        .setOption("title", "Antal solgte varer pr. måned pr. produkt")
+        .setOption("isStacked", true);
+    dash.updateChart(builderSales.build());
+  } else {
+    var salesChart = dash.newChart()
+        .asColumnChart()
+        .addRange(salesChartRange)
+        .setPosition(salesHeaderRow + stats.combinedData.length + 2, 1, 0, 0)
+        .setOption("title", "Antal solgte varer pr. måned pr. produkt")
+        .setOption("isStacked", true)
+        .build();
+    dash.insertChart(salesChart);
   }
 }
 
