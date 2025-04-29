@@ -625,47 +625,34 @@ function updateCharts(dash, stats) {
   var startRow = 8;
   var chartRange = dash.getRange("A8:C" + (startRow - 1 + stats.combinedData.length));
 
-  // Slet eksisterende diagram med titlen "Månedlig Fortjeneste og Omsætning"
+  // Find the existing chart with the title "Månedlig Fortjeneste og Omsætning"
   var existingCharts = dash.getCharts().filter(function(c) {
     return c.getOptions().title === "Månedlig Fortjeneste og Omsætning";
   });
+
   if (existingCharts.length > 0) {
-    Logger.log("Sletter eksisterende diagram med titlen 'Månedlig Fortjeneste og Omsætning'");
-    dash.removeChart(existingCharts[0]);
+    // Update the existing chart with the new data range
+    var builder = existingCharts[0].modify();
+    builder.clearRanges().addRange(chartRange)
+           .setOption("title", "Månedlig Fortjeneste og Omsætning")
+           .setOption('legend', { position: 'bottom' });
+    dash.updateChart(builder.build());
   }
 
-  // Opret nyt diagram for månedlig fortjeneste og omsætning
-  Logger.log("Opretter nyt diagram 'Månedlig Fortjeneste og Omsætning'");
-  var chart = dash.newChart()
-      .asColumnChart()
-      .addRange(chartRange)
-      .setPosition(8, 1, 0, 0)
-      .setOption("title", "Månedlig Fortjeneste og Omsætning")
-      .setOption('legend', { position: 'bottom' })
-      .build();
-  dash.insertChart(chart);
-
-  // Diagram for salg pr. måned pr. produkt (stacked column)
+  // Find the existing chart with the title "Antal solgte varer pr. måned pr. produkt"
   var salesHeaderRow = startRow + stats.combinedData.length + 22;
   var salesChartRange = dash.getRange(salesHeaderRow, 1, stats.combinedData.length, stats.combinedData[0].length + 1);
   var existingSalesCharts = dash.getCharts().filter(function(c) {
     return c.getOptions().title === "Antal solgte varer pr. måned pr. produkt";
   });
+
   if (existingSalesCharts.length > 0) {
+    // Update the existing chart with the new data range
     var builderSales = existingSalesCharts[0].modify();
-    builderSales = builderSales.clearRanges().addRange(salesChartRange)
-        .setOption("title", "Antal solgte varer pr. måned pr. produkt")
-        .setOption("isStacked", true);
+    builderSales.clearRanges().addRange(salesChartRange)
+                .setOption("title", "Antal solgte varer pr. måned pr. produkt")
+                .setOption("isStacked", true);
     dash.updateChart(builderSales.build());
-  } else {
-    var salesChart = dash.newChart()
-        .asColumnChart()
-        .addRange(salesChartRange)
-        .setPosition(salesHeaderRow + stats.combinedData.length + 2, 1, 0, 0)
-        .setOption("title", "Antal solgte varer pr. måned pr. produkt")
-        .setOption("isStacked", true)
-        .build();
-    dash.insertChart(salesChart);
   }
 }
 
